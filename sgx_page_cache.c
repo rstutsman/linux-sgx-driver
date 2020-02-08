@@ -70,6 +70,8 @@
 #endif
 #include <linux/slab.h>
 
+#include <linux/moduleparam.h>
+
 #define SGX_NR_LOW_EPC_PAGES_DEFAULT 32
 #define SGX_NR_SWAP_CLUSTER_MAX	16
 
@@ -400,24 +402,73 @@ static int ksgxswapd(void *p)
 	return 0;
 }
 
+static int interleave = 0;
+module_param(interleave, int, 0660);
+
 int sgx_add_epc_bank(resource_size_t start, unsigned long size, int bank)
 {
 	unsigned long i;
 	struct sgx_epc_page *new_epc_page, *entry;
 	struct list_head *parser, *temp;
 
-	for (i = 0; i < size; i += PAGE_SIZE) {
-		new_epc_page = kzalloc(sizeof(*new_epc_page), GFP_KERNEL);
-		if (!new_epc_page)
-			goto err_freelist;
-		new_epc_page->pa = (start + i) | bank;
 
-		spin_lock(&sgx_free_list_lock);
-		list_add_tail(&new_epc_page->list, &sgx_free_list);
-		sgx_nr_total_epc_pages++;
-		sgx_nr_free_pages++;
-		spin_unlock(&sgx_free_list_lock);
+	if (interleave) {
+		printk(KERN_INFO "INTERLEAVE sgx_free_list!\n");
+		for (i = 0; i < size; i += 2 * PAGE_SIZE) {
+			new_epc_page = kzalloc(sizeof(*new_epc_page), GFP_KERNEL);
+			if (!new_epc_page)
+				goto err_freelist;
+			new_epc_page->pa = (start + i) | bank;
+
+			spin_lock(&sgx_free_list_lock);
+			list_add_tail(&new_epc_page->list, &sgx_free_list);
+			sgx_nr_total_epc_pages++;
+			sgx_nr_free_pages++;
+			spin_unlock(&sgx_free_list_lock);
+		}
+
+		for (i = 1; i < size; i += 2 * PAGE_SIZE) {
+			new_epc_page = kzalloc(sizeof(*new_epc_page), GFP_KERNEL);
+			if (!new_epc_page)
+				goto err_freelist;
+			new_epc_page->pa = (start + i) | bank;
+
+			spin_lock(&sgx_free_list_lock);
+			list_add_tail(&new_epc_page->list, &sgx_free_list);
+			sgx_nr_total_epc_pages++;
+			sgx_nr_free_pages++;
+			spin_unlock(&sgx_free_list_lock);
+		}
+	} else {
+		printk(KERN_INFO "NOINTERLEAVE sgx_free_list!\n");
+		for (i = 0; i < size; i += PAGE_SIZE) {
+			new_epc_page = kzalloc(sizeof(*new_epc_page), GFP_KERNEL);
+			if (!new_epc_page)
+				goto err_freelist;
+			new_epc_page->pa = (start + i) | bank;
+
+			spin_lock(&sgx_free_list_lock);
+			list_add_tail(&new_epc_page->list, &sgx_free_list);
+			sgx_nr_total_epc_pages++;
+			sgx_nr_free_pages++;
+			spin_unlock(&sgx_free_list_lock);
+		}
 	}
+
+#define DEBUG_DUMP 1
+#if DEBUG_DUMP
+	printk(KERN_INFO "EPC page frame addresses\n");
+	unsigned count = 10;
+	list_for_each_safe(parser, temp, &sgx_free_list) {
+		spin_lock(&sgx_free_list_lock);
+		entry = list_entry(parser, struct sgx_epc_page, list);
+		printk(KERN_INFO "0x%llx\n", entry->pa);
+		spin_unlock(&sgx_free_list_lock);
+		count--;
+		if (count == 0)
+			break;
+	}
+#endif
 
 	return 0;
 err_freelist:
